@@ -1,0 +1,110 @@
+# ============================================================
+# News2Price 项目配置文件
+# 基于新闻文本的A股股价波动预测
+# ============================================================
+
+# ---------- 数据源配置 ----------
+data:
+  # 目标指数（Tushare代码）
+  index_code: "399300.SZ"        # 沪深300
+  index_name: "沪深300"
+
+  # 日期范围
+  start_date: "20180101"
+  end_date: "20241231"
+
+  # Tushare 配置
+  tushare:
+    retry_times: 3
+    retry_delay: 2               # 秒
+
+  # GDELT 新闻配置
+  gdelt:
+    # GDELT 2.0 GKG 表下载地址
+    base_url: "https://data.gdeltproject.org/gdeltv2"
+    # 筛选关键词（用于过滤中国/A股相关新闻）
+    keywords:
+      - "China stock"
+      - "A-share"
+      - "沪深"
+      - "A股"
+      - "上证"
+      - "深证"
+      - "证监会"
+      - "央行"
+      - "货币政策"
+    # 语言过滤（空=不过滤）
+    language: ""
+
+# ---------- 文本处理配置 ----------
+text_processing:
+  # 分词工具
+  tokenizer: "jieba"
+  # 是否去除停用词
+  remove_stopwords: true
+  # 停用词表路径（空=使用默认）
+  stopwords_path: ""
+
+# ---------- 情感分析配置 ----------
+sentiment:
+  # 方法: "finbert" / "llm" / "both"
+  method: "both"
+
+  # FinBERT 配置
+  finbert:
+    # 模型名称（HuggingFace）
+    model_name: "yiyanghkust/finbert-tone"
+    # 批次大小
+    batch_size: 32
+    # 设备: "cpu" / "cuda" / "auto"
+    device: "auto"
+
+  # LLM API 配置（从 .env 读取 base_url / api_key / model_name）
+  llm:
+    # 情感分类 prompt 模板
+    prompt_template: |
+      请分析以下财经新闻的情感倾向，只回复一个词：positive、negative 或 neutral。
+      新闻内容：{text}
+    # 每批最大并发数
+    max_concurrent: 5
+    # 请求超时（秒）
+    timeout: 30
+    # 重试次数
+    retry_times: 3
+
+# ---------- 特征工程配置 ----------
+features:
+  # 情感衰减系数（λ），用于处理非交易日新闻
+  # effective_sentiment_t = Σ sentiment_{t-k} × λ^k
+  decay_lambda: 0.5
+  # 衰减窗口（天）
+  decay_window: 5
+  # 极端情绪阈值（标准差倍数）
+  extreme_threshold: 1.5
+
+# ---------- VAR 模型配置 ----------
+var_model:
+  # 滞后阶数（与Tetlock论文一致）
+  lags: 5
+  # 内生变量（需与 feature_engineer 输出列名一致）
+  endogenous_vars:
+    - "return"            # 日收益率
+    - "avg_sentiment"     # 情感得分
+    - "volume_detrend"    # 去趋势交易量（对数）
+  # 是否加入星期哑变量
+  weekday_dummies: true
+  # 是否加入月份哑变量
+  month_dummies: true
+  # 显著性水平
+  significance_level: 0.05
+
+# ---------- 可视化配置 ----------
+visualization:
+  # 图片 DPI
+  dpi: 150
+  # 图片格式
+  format: "png"
+  # 中文字体
+  font_family: "SimHei"
+  # 风格
+  style: "seaborn-v0_8-whitegrid"
