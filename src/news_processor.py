@@ -14,9 +14,9 @@ from pathlib import Path
 import jieba
 import pandas as pd
 
-from src.utils import load_config, PROJECT_ROOT
+from src.utils import load_config, PROJECT_ROOT, setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 # 默认中文停用词（常用）
 _DEFAULT_STOPWORDS = set(
@@ -28,7 +28,7 @@ _DEFAULT_STOPWORDS = set(
     已经 还是 或者 以及 并且 而且 不过 只是 但是 然而 因此 所以
     对于 关于 根据 按照 由于 通过 经过 为了 对于 关于
     万 亿 元 美元 人民币 港元 日元 英镑 欧元
-    记者 报道 讯 电 新华社 人民日报 央视 本报记者
+    据 记者 报道 讯 电 新华社 人民日报 央视 本报记者
     """.split()
 )
 
@@ -45,10 +45,20 @@ class NewsProcessor:
 
         # 加载停用词
         self.stopwords = set(_DEFAULT_STOPWORDS)
-        if self.stopwords_path and Path(self.stopwords_path).exists():
-            with open(self.stopwords_path, "r", encoding="utf-8") as f:
-                self.stopwords.update(line.strip() for line in f if line.strip())
-            logger.info(f"加载自定义停用词表: {len(self.stopwords)} 个")
+        if self.stopwords_path:
+            # 支持相对路径（相对于项目根目录）
+            sw_path = Path(self.stopwords_path)
+            if not sw_path.is_absolute():
+                sw_path = PROJECT_ROOT / sw_path
+            if sw_path.exists():
+                with open(sw_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        word = line.strip()
+                        if word and not word.startswith("#"):
+                            self.stopwords.add(word)
+                logger.info(f"加载自定义停用词表: {sw_path}，共 {len(self.stopwords)} 个")
+            else:
+                logger.warning(f"停用词表文件不存在: {sw_path}")
 
         # 初始化 jieba
         jieba.setLogLevel(logging.WARNING)
@@ -120,6 +130,7 @@ class NewsProcessor:
         """
         批量处理 DataFrame 中的新闻文本
         新增列: cleaned_text, tokens, tokens_filtered
+        当 text_col 为空时，自动回退到 title 列
         """
         df = df.copy()
 
@@ -134,6 +145,13 @@ class NewsProcessor:
 
         # 填充空值
         df[text_col] = df[text_col].fillna("").astype(str)
+
+        # 如果 content 列存在但大量为空，回退到 title
+        if text_col == "content" and "title" in df.columns:
+            empty_mask = df[text_col].str.strip() == ""
+            if empty_mask.sum() > 0:
+                logger.info(f"content 列有 {empty_mask.sum()} 条为空，使用 title 列补充")
+                df.loc[empty_mask, text_col] = df.loc[empty_mask, "title"].fillna("").astype(str)
 
         # 逐行处理
         results = df[text_col].apply(self.process_text)
@@ -192,5 +210,5 @@ if __name__ == "__main__":
 
     result = processor.process_text(test_text)
     print("清洗后:", result["cleaned"])
-    print("分词:", result["tokens"][:20])
-    print("去停用词:", result["tokens_filtered"][:20])
+    print("分词:", result["tokens"])
+    print("去停用词:", result["tokens_filtered"])

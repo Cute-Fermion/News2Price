@@ -15,9 +15,9 @@ import numpy as np
 import tushare as ts
 import akshare as ak
 
-from src.utils import get_tushare_token, load_config, PROJECT_ROOT
+from src.utils import get_tushare_token, load_config, PROJECT_ROOT, setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 # ============================================================
@@ -75,133 +75,190 @@ class TushareIndexCollector:
 
 
 # ============================================================
-# AkShare 新闻采集（主力新闻源）
+# AkShare 新闻采集（央视财经新闻）
 # ============================================================
 class AkShareNewsCollector:
-    """从 AkShare 获取财经新闻数据"""
+    """
+    从 AkShare 的 news_cctv 接口获取央视财经新闻数据。
+    按交易日逐日获取，每次调用返回当天约 10-15 条新闻。
+    """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, trade_dates: list[str] | None = None):
         self.config = config["data"]
         self.start_date = self.config["start_date"]
         self.end_date = self.config["end_date"]
+        self.trade_dates = trade_dates  # 交易日列表 (YYYYMMDD 格式)
+        self.delay = self.config.get("akshare", {}).get("delay", 0.3)
 
     def fetch(self) -> pd.DataFrame:
         """
         获取财经新闻
         返回 DataFrame: date, title, content, source
         """
-        start = datetime.strptime(self.start_date, "%Y%m%d")
-        end = datetime.strptime(self.end_date, "%Y%m%d")
+        logger.info("通过 AkShare news_cctv 获取央视财经新闻...")
+
+        # 确定要获取的日期列表：优先使用交易日，否则按周遍历
+        if self.trade_dates:
+            dates_to_fetch = self.trade_dates
+        else:
+            dates_to_fetch = self._generate_weekday_dates()
 
         all_news = []
+        total = len(dates_to_fetch)
+        failed = 0
 
-        # 方法1: 东方财富快讯
-        logger.info("尝试从东方财富获取财经新闻...")
-        try:
-            news_df = self._fetch_eastmoney_news(start, end)
-            if news_df is not None and len(news_df) > 0:
-                all_news.append(news_df)
-                logger.info(f"东方财富: 获取 {len(news_df)} 条新闻")
-        except Exception as e:
-            logger.warning(f"东方财富新闻获取失败: {e}")
+        for i, date_str in enumerate(dates_to_fetch):
+            try:
+                df = ak.news_cctv(date=date_str)
+                if df is not None and len(df) > 0:
+                    df["date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+                    df["source"] = "央视新闻"
+                    all_news.append(df[["date", "title", "content", "source"]])
 
-        # 方法2: 新浪财经新闻
-        logger.info("尝试从新浪财经获取新闻...")
-        try:
-            news_df = self._fetch_sina_news(start, end)
-            if news_df is not None and len(news_df) > 0:
-                all_news.append(news_df)
-                logger.info(f"新浪财经: 获取 {len(news_df)} 条新闻")
-        except Exception as e:
-            logger.warning(f"新浪财经新闻获取失败: {e}")
+                if (i + 1) % 50 == 0 or (i + 1) == total:
+                    logger.info(f"  进度: {i+1}/{total}，已获取 {sum(len(x) for x in all_news)} 条新闻")
+            except Exception as e:
+                failed += 1
+                if failed <= 3:
+                    logger.debug(f"  {date_str} 获取失败: {e}")
+
+            time.sleep(self.delay)
 
         if not all_news:
-            logger.warning("AkShare 新闻源均未获取到数据，将尝试 GDELT")
+            logger.warning("AkShare 新闻源未获取到数据，将尝试 GDELT")
             return pd.DataFrame()
 
         result = pd.concat(all_news, ignore_index=True)
+        result = result.dropna(subset=["title", "content"])
         result = result.drop_duplicates(subset=["title"], keep="first")
         result = result.sort_values("date").reset_index(drop=True)
 
-        logger.info(f"AkShare 共获取 {len(result)} 条去重新闻")
+        logger.info(f"AkShare 共获取 {len(result)} 条去重新闻（{failed} 个日期失败）")
         return result
 
-    def _fetch_eastmoney_news(
-        self, start: datetime, end: datetime
-    ) -> pd.DataFrame | None:
-        """获取东方财富财经新闻"""
-        try:
-            # 使用 akshare 的财经新闻接口
-            news_df = ak.stock_news_em(symbol="399300")
-            if news_df is None or len(news_df) == 0:
-                return None
+    def _generate_weekday_dates(self) -> list[str]:
+        """生成日期范围内所有周一到周五的日期（YYYYMMDD 格式）"""
+        start = datetime.strptime(self.start_date, "%Y%m%d")
+        end = datetime.strptime(self.end_date, "%Y%m%d")
+        dates = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:  # 周一到周五
+                dates.append(current.strftime("%Y%m%d"))
+            current += timedelta(days=1)
+        return dates
 
-            # 标准化列名
-            col_map = {}
-            for col in news_df.columns:
-                col_lower = col.lower()
-                if "时间" in col or "time" in col_lower or "date" in col_lower:
-                    col_map[col] = "date"
-                elif "标题" in col or "title" in col_lower:
-                    col_map[col] = "title"
-                elif "内容" in col or "content" in col_lower:
-                    col_map[col] = "content"
-                elif "来源" in col or "source" in col_lower:
-                    col_map[col] = "source"
 
-            news_df = news_df.rename(columns=col_map)
+# ============================================================
+# Tushare 本地新闻缓存加载器
+# ============================================================
+class TushareNewsLoader:
+    """
+    从本地缓存加载 Tushare 新闻数据（由 scripts/fetch_tushare_news.py 采集）
+    合并 news（新浪财经快讯）、major_news（新闻通讯）、cctv_news（新闻联播）三个源。
+    统一输出: date, title, content, source
+    """
 
-            if "date" in news_df.columns:
-                news_df["date"] = pd.to_datetime(news_df["date"], errors="coerce")
-                news_df = news_df[
-                    (news_df["date"] >= start) & (news_df["date"] <= end)
-                ]
+    def __init__(self, config: dict, cache_dir: str | Path | None = None):
+        self.config = config["data"]
+        self.start_date = self.config["start_date"]
+        self.end_date = self.config["end_date"]
+        if cache_dir is None:
+            cache_dir = PROJECT_ROOT / "data" / "tushare_news"
+        self.cache_dir = Path(cache_dir)
+        # 过滤后数据目录（优先使用）
+        self.filtered_dir = PROJECT_ROOT / "data" / "filtered_news"
 
-            if "source" not in news_df.columns:
-                news_df["source"] = "东方财富"
+    def is_available(self) -> bool:
+        """检查本地缓存是否存在且有数据（优先检查过滤后数据）"""
+        # 优先检查过滤后数据
+        filtered_file = self.filtered_dir / "filtered_news.csv"
+        if filtered_file.exists():
+            return True
+        # 回退到原始缓存
+        if not self.cache_dir.exists():
+            return False
+        files = list(self.cache_dir.glob("*.csv"))
+        return len(files) > 0
 
-            return news_df[["date", "title", "content", "source"]]
-        except Exception as e:
-            logger.debug(f"东方财富接口异常: {e}")
-            return None
+    def fetch(self) -> pd.DataFrame:
+        """
+        加载本地缓存并合并为统一格式
+        优先使用过滤后数据 (data/filtered_news/filtered_news.csv)
+        返回 DataFrame: date, title, content, source
+        """
+        # 优先检查过滤后数据
+        filtered_file = self.filtered_dir / "filtered_news.csv"
+        if filtered_file.exists():
+            logger.info(f"加载过滤后新闻数据: {filtered_file}")
+            result = pd.read_csv(filtered_file, parse_dates=["date"])
+            # 过滤日期范围
+            start = pd.to_datetime(self.start_date, format="%Y%m%d")
+            end = pd.to_datetime(self.end_date, format="%Y%m%d")
+            result = result[(result["date"] >= start) & (result["date"] <= end)]
+            result = result.sort_values("date").reset_index(drop=True)
+            logger.info(f"过滤后新闻数据: {len(result)} 条")
+            return result
 
-    def _fetch_sina_news(
-        self, start: datetime, end: datetime
-    ) -> pd.DataFrame | None:
-        """获取新浪财经新闻"""
-        try:
-            # 使用 js_news 接口获取财经新闻
-            news_df = ak.js_news(timestamp=start.strftime("%Y-%m-%d %H:%M:%S"))
-            if news_df is None or len(news_df) == 0:
-                return None
+        logger.info(f"从本地缓存加载 Tushare 新闻: {self.cache_dir}")
 
-            col_map = {}
-            for col in news_df.columns:
-                col_lower = col.lower()
-                if "时间" in col or "time" in col_lower or "date" in col_lower:
-                    col_map[col] = "date"
-                elif "标题" in col or "title" in col_lower or "新闻" in col:
-                    col_map[col] = "title"
-                elif "内容" in col or "content" in col_lower or "正文" in col:
-                    col_map[col] = "content"
+        all_dfs = []
 
-            news_df = news_df.rename(columns=col_map)
+        # 1. 新浪财经快讯 (news_sina.csv)
+        news_file = self.cache_dir / "news_sina.csv"
+        if news_file.exists():
+            df = pd.read_csv(news_file)
+            if len(df) > 0:
+                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+                df["date"] = df["datetime"].dt.normalize()
+                df["source"] = "新浪财经"
+                df = df.rename(columns={"title": "title", "content": "content"})
+                all_dfs.append(df[["date", "title", "content", "source"]])
+                logger.info(f"  新浪财经快讯: {len(df)} 条")
 
-            if "date" in news_df.columns:
-                news_df["date"] = pd.to_datetime(news_df["date"], errors="coerce")
-                news_df = news_df[
-                    (news_df["date"] >= start) & (news_df["date"] <= end)
-                ]
+        # 2. 新闻通讯 (major_news.csv)
+        major_file = self.cache_dir / "major_news.csv"
+        if major_file.exists():
+            df = pd.read_csv(major_file)
+            if len(df) > 0:
+                df["pub_time"] = pd.to_datetime(df["pub_time"], errors="coerce")
+                df["date"] = df["pub_time"].dt.normalize()
+                # source 字段已在数据中，统一列名
+                if "src" in df.columns:
+                    df["source"] = df["src"]
+                else:
+                    df["source"] = "新闻通讯"
+                all_dfs.append(df[["date", "title", "content", "source"]])
+                logger.info(f"  新闻通讯: {len(df)} 条")
 
-            if "source" not in news_df.columns:
-                news_df["source"] = "新浪财经"
-            if "content" not in news_df.columns:
-                news_df["content"] = news_df.get("title", "")
+        # 3. 新闻联播 (cctv_news.csv)
+        cctv_file = self.cache_dir / "cctv_news.csv"
+        if cctv_file.exists():
+            df = pd.read_csv(cctv_file)
+            if len(df) > 0:
+                df["date"] = pd.to_datetime(df["date"], format="%Y%m%d", errors="coerce")
+                df["source"] = "央视新闻联播"
+                all_dfs.append(df[["date", "title", "content", "source"]])
+                logger.info(f"  新闻联播: {len(df)} 条")
 
-            return news_df[["date", "title", "content", "source"]]
-        except Exception as e:
-            logger.debug(f"新浪财经接口异常: {e}")
-            return None
+        if not all_dfs:
+            logger.warning("本地缓存中无有效数据")
+            return pd.DataFrame()
+
+        result = pd.concat(all_dfs, ignore_index=True)
+
+        # 过滤日期范围
+        start = pd.to_datetime(self.start_date, format="%Y%m%d")
+        end = pd.to_datetime(self.end_date, format="%Y%m%d")
+        result = result[(result["date"] >= start) & (result["date"] <= end)]
+
+        # 清洗
+        result = result.dropna(subset=["title", "content"])
+        result = result.drop_duplicates(subset=["date", "title"], keep="first")
+        result = result.sort_values("date").reset_index(drop=True)
+
+        logger.info(f"本地 Tushare 新闻合计: {len(result)} 条 (去重后)")
+        return result
 
 
 # ============================================================
@@ -369,12 +426,25 @@ def collect_all_data(config: dict | None = None) -> dict:
     stock_collector = TushareIndexCollector(config)
     stock_df = stock_collector.fetch()
 
-    # 2. 获取新闻数据（优先 AkShare，备选 GDELT）
+    # 2. 获取新闻数据
+    # 优先级: 过滤后新闻 > 本地 Tushare 缓存 > AkShare > GDELT
+    trade_dates = stock_df["trade_date"].dt.strftime("%Y%m%d").tolist()
+
     news_df = pd.DataFrame()
 
-    ak_collector = AkShareNewsCollector(config)
-    news_df = ak_collector.fetch()
+    # 优先尝试本地 Tushare 缓存
+    tushare_loader = TushareNewsLoader(config)
+    if tushare_loader.is_available():
+        logger.info("检测到本地 Tushare 新闻缓存，优先使用")
+        news_df = tushare_loader.fetch()
 
+    # 本地缓存不可用，回退到 AkShare
+    if news_df.empty:
+        logger.info("本地 Tushare 缓存不可用，尝试 AkShare...")
+        ak_collector = AkShareNewsCollector(config, trade_dates=trade_dates)
+        news_df = ak_collector.fetch()
+
+    # AkShare 也没有，回退到 GDELT
     if news_df.empty:
         logger.info("AkShare 无数据，切换到 GDELT...")
         gdelt_collector = GDELTNewsCollector(config)

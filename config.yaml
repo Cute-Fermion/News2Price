@@ -10,13 +10,17 @@ data:
   index_name: "沪深300"
 
   # 日期范围
-  start_date: "20180101"
-  end_date: "20241231"
+  start_date: "20220101"
+  end_date: "20260831"
 
   # Tushare 配置
   tushare:
     retry_times: 3
     retry_delay: 2               # 秒
+
+  # AkShare 配置
+  akshare:
+    delay: 0.3                   # 每次请求间隔（秒），避免被封
 
   # GDELT 新闻配置
   gdelt:
@@ -36,6 +40,29 @@ data:
     # 语言过滤（空=不过滤）
     language: ""
 
+  # Tushare 本地新闻缓存配置
+  tushare_news:
+    # 缓存目录（相对于项目根目录）
+    cache_dir: "data/tushare_news"
+    # 新闻来源过滤（空=使用全部来源）
+    # 可选: "sina" (新浪财经快讯)
+    news_src: "sina"
+    # 是否启用本地缓存（false 则跳过缓存直接走 AkShare/GDELT）
+    enabled: true
+
+# ---------- 新闻过滤配置 ----------
+news_filter:
+  # 黑名单文件路径（相对于项目根目录）
+  blacklist_path: "words/blacklist.txt"
+  # 白名单文件路径（相对于项目根目录）
+  whitelist_path: "words/whitelist.txt"
+  # 白名单最少命中数（至少命中几个白名单词才保留）
+  min_whitelist_hits: 2
+  # 内容匹配最大长度（只匹配 content 前 N 个字符）
+  content_max_length: 200
+  # 过滤后数据缓存目录
+  filtered_dir: "data/filtered_news"
+
 # ---------- 文本处理配置 ----------
 text_processing:
   # 分词工具
@@ -43,12 +70,29 @@ text_processing:
   # 是否去除停用词
   remove_stopwords: true
   # 停用词表路径（空=使用默认）
-  stopwords_path: ""
+  stopwords_path: "words\\stopwords.txt"
 
 # ---------- 情感分析配置 ----------
 sentiment:
-  # 方法: "finbert" / "llm" / "both"
-  method: "both"
+  # 方法: "dictionary" / "finbert" / "llm" / "both"
+  method: "dictionary"
+
+  # 词典法配置
+  dictionary:
+    # 正面词表路径
+    positive_words_path: "words\\positive_words.txt"
+    # 负面词表路径
+    negative_words_path: "words\\negative_words.txt"
+    # 否定词表路径
+    negation_words_path: "words\\negation_words.txt"
+    # 程度副词表路径（Tab 分隔: 词语\t系数）
+    degree_adverbs_path: "words\\degree_adverbs.txt"
+    # 否定词翻转窗口（向前看几个 token）
+    negation_window: 3
+    # 程度副词查找窗口（向前看几个 token）
+    degree_window: 2
+    # 情感分类阈值（score 绝对值超过此值才分为 positive/negative）
+    threshold: 0.1
 
   # FinBERT 配置
   finbert:
@@ -58,19 +102,54 @@ sentiment:
     batch_size: 32
     # 设备: "cpu" / "cuda" / "auto"
     device: "auto"
+    # 输入文本最大截断长度（字符数）
+    max_text_length: 2000
+    # 模型最大 token 长度
+    max_length: 512
 
   # LLM API 配置（从 .env 读取 base_url / api_key / model_name）
   llm:
-    # 情感分类 prompt 模板
-    prompt_template: |
-      请分析以下财经新闻的情感倾向，只回复一个词：positive、negative 或 neutral。
-      新闻内容：{text}
-    # 每批最大并发数
-    max_concurrent: 5
+    # 每批处理文章数（一次 API 调用处理 N 篇，减少调用次数）
+    batch_size: 10
+    # 每日最大处理新闻数（超过则采样，控制成本；0 或空表示不限制）
+    max_news_per_day: 30
+    # 采样策略: "random"（纯随机）/ "priority"（优先有正文的，剩余随机）
+    sampling_strategy: "random"
+    # 情感分类 prompt 模板（单条，用于 fallback）
+    prompt_template: "请分析以下财经新闻对沪深300指数的情感倾向。情感倾向包含 positive/negative/neutral，confidence 取值在 0.0~1.0 范围内。请严格用 JSON 格式回复：{{\"label\": \"positive/negative/neutral\", \"confidence\": 0.8}}。新闻内容：{text}"
+    # 批量 prompt 模板（多条，{articles} 会被替换为编号后的文章列表）
+    batch_prompt_template: "请分析以下 {n} 条财经新闻对沪深300指数的情感倾向。对每条新闻判断情感（positive/negative/neutral）和置信度（0.0~1.0）。请严格按 JSON 数组格式回复，不要包含其他内容：\n[{{\"id\": 1, \"label\": \"positive/negative/neutral\", \"confidence\": 0.8}}, ...]\n\n{articles}"
+    # 每批最大并发批次数（同时发送多少个 batch 请求）
+    max_concurrent: 20
     # 请求超时（秒）
     timeout: 30
     # 重试次数
     retry_times: 3
+    # 输入文本最大截断长度（字符数）
+    max_text_length: 1500
+    # 最大输出 token 数（reasoning model 需要更多 token）
+    max_tokens: 300
+    # 温度参数（0 = 确定性输出）
+    temperature: 0.0
+    # 正面 label 映射（LLM 可能返回的变体 → 统一为 positive）
+    positive_labels:
+      - "positive"
+      - "pos"
+      - "积极"
+      - "正面"
+      - "利好"
+    # 负面 label 映射
+    negative_labels:
+      - "negative"
+      - "neg"
+      - "消极"
+      - "负面"
+      - "利空"
+    # 兜底解析的默认置信度
+    fallback_confidence:
+      positive: 0.6
+      negative: 0.6
+      neutral: 0.3
 
 # ---------- 特征工程配置 ----------
 features:
@@ -81,6 +160,8 @@ features:
   decay_window: 5
   # 极端情绪阈值（标准差倍数）
   extreme_threshold: 1.5
+  # 极端情绪滚动窗口（天），避免 look-ahead bias
+  rolling_window: 30
 
 # ---------- VAR 模型配置 ----------
 var_model:

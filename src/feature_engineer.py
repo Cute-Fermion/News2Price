@@ -13,9 +13,9 @@ import logging
 import numpy as np
 import pandas as pd
 
-from src.utils import load_config
+from src.utils import load_config, setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 class FeatureEngineer:
@@ -28,6 +28,7 @@ class FeatureEngineer:
         self.decay_lambda = feat_config.get("decay_lambda", 0.5)
         self.decay_window = feat_config.get("decay_window", 5)
         self.extreme_threshold = feat_config.get("extreme_threshold", 1.5)
+        self.rolling_window = feat_config.get("rolling_window", 30)
 
     def aggregate_daily_sentiment(
         self,
@@ -108,10 +109,24 @@ class FeatureEngineer:
 
     def create_extreme_flag(self, sentiment_series: pd.Series) -> pd.Series:
         """
-        标记极端情绪日（超过均值 ± threshold * std）
+        标记极端情绪日（使用滚动窗口，避免 look-ahead bias）
+        基于过去 rolling_window 日的均值和标准差判断
+        前 rolling_window-1 个数据点使用扩展窗口（expanding）
         """
-        mean = sentiment_series.mean()
-        std = sentiment_series.std()
+        window = self.rolling_window
+
+        # 滚动均值和标准差（min_periods=10 保证早期数据也能计算）
+        rolling_mean = sentiment_series.rolling(window=window, min_periods=10).mean()
+        rolling_std = sentiment_series.rolling(window=window, min_periods=10).std()
+
+        # 对于前 window 个数据点，使用 expanding 窗口补充
+        expanding_mean = sentiment_series.expanding(min_periods=5).mean()
+        expanding_std = sentiment_series.expanding(min_periods=5).std()
+
+        # 合并：前 window 个用 expanding，之后用 rolling
+        mean = rolling_mean.combine_first(expanding_mean)
+        std = rolling_std.combine_first(expanding_std)
+
         upper = mean + self.extreme_threshold * std
         lower = mean - self.extreme_threshold * std
 

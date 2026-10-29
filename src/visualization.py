@@ -19,12 +19,12 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
 
-from src.utils import load_config, PROJECT_ROOT
+from src.utils import load_config, PROJECT_ROOT, setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
-# 中文字体设置
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "STSong", "DejaVu Sans"]
+# 字体设置（使用英文标签，无需中文字体）
+plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -61,20 +61,20 @@ class Visualizer:
     # ================================================================
     # 行情走势图
     # ================================================================
-    def plot_stock_price(self, df: pd.DataFrame, title: str = "沪深300指数走势"):
+    def plot_stock_price(self, df: pd.DataFrame, title: str = "CSI 300 Index"):
         """绘制收盘价和交易量走势"""
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, height_ratios=[3, 1])
 
         ax1.plot(df["trade_date"], df["close"], linewidth=1, color="#1f77b4")
-        ax1.set_ylabel("收盘价", fontsize=12)
+        ax1.set_ylabel("Close Price", fontsize=12)
         ax1.set_title(title, fontsize=14)
         ax1.grid(True, alpha=0.3)
 
         # 交易量
-        colors = ["#2ca02c" if r >= 0 else "#d62728" for r in df.get("return", pd.Series(0))]
+        colors = ["#d62728" if r >= 0 else "#2ca02c" for r in df.get("return", pd.Series(0))]
         ax2.bar(df["trade_date"], df["volume"] / 1e6, color=colors, alpha=0.6, width=1)
-        ax2.set_ylabel("交易量 (百万)", fontsize=12)
-        ax2.set_xlabel("日期", fontsize=12)
+        ax2.set_ylabel("Volume (Million)", fontsize=12)
+        ax2.set_xlabel("Date", fontsize=12)
         ax2.grid(True, alpha=0.3)
 
         # 格式化 x 轴日期
@@ -91,7 +91,7 @@ class Visualizer:
         self,
         df: pd.DataFrame,
         sentiment_col: str = "avg_sentiment",
-        title: str = "日度情感指数",
+        title: str = "Daily Sentiment Index",
     ):
         """绘制情感指数随时间变化"""
         fig, ax = plt.subplots(figsize=(14, 5))
@@ -104,11 +104,11 @@ class Visualizer:
         # 极端情绪区域
         mean = df[sentiment_col].mean()
         std = df[sentiment_col].std()
-        ax.axhline(y=mean + 1.5 * std, color="orange", linestyle=":", alpha=0.5, label="极端阈值")
+        ax.axhline(y=mean + 1.5 * std, color="orange", linestyle=":", alpha=0.5, label="Extreme Threshold")
         ax.axhline(y=mean - 1.5 * std, color="orange", linestyle=":", alpha=0.5)
 
-        ax.set_ylabel("情感得分", fontsize=12)
-        ax.set_xlabel("日期", fontsize=12)
+        ax.set_ylabel("Sentiment Score", fontsize=12)
+        ax.set_xlabel("Date", fontsize=12)
         ax.set_title(title, fontsize=14)
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -154,13 +154,13 @@ class Visualizer:
             sentiment_lag.loc[valid.index].max(),
             100,
         )
-        ax.plot(x_line, p(x_line), "r--", linewidth=2, label=f"趋势线 (slope={z[0]:.4f})")
+        ax.plot(x_line, p(x_line), "r--", linewidth=2, label=f"Trend Line (slope={z[0]:.4f})")
 
         ax.axhline(y=0, color="gray", linestyle="-", alpha=0.3)
         ax.axvline(x=0, color="gray", linestyle="-", alpha=0.3)
-        ax.set_xlabel(f"情感得分 (lag={lag})", fontsize=12)
-        ax.set_ylabel("日收益率", fontsize=12)
-        ax.set_title(f"滞后{lag}日情感 vs 当日收益", fontsize=14)
+        ax.set_xlabel(f"Sentiment Score (lag={lag})", fontsize=12)
+        ax.set_ylabel("Daily Return", fontsize=12)
+        ax.set_title(f"Lag-{lag} Sentiment vs Daily Return", fontsize=14)
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -169,9 +169,20 @@ class Visualizer:
     # ================================================================
     # VAR 脉冲响应图
     # ================================================================
-    def plot_impulse_response(self, irf_data: dict, steps: int = 10):
+    def plot_impulse_response(self, irf_data: dict, steps: int = 10,
+                               var_names: list[str] | None = None):
         """绘制脉冲响应函数"""
-        var_names = ["return", "sentiment", "volume"]
+        if var_names is None:
+            var_names = list(irf_data.keys())
+            # 从 key 中提取变量名 (格式: "cause_→_effect")
+            all_vars = set()
+            for key in irf_data:
+                parts = key.split("_→_")
+                if len(parts) == 2:
+                    all_vars.add(parts[0])
+                    all_vars.add(parts[1])
+            var_names = sorted(all_vars) if all_vars else ["return", "avg_sentiment", "volume_detrend"]
+
         n = len(var_names)
 
         fig, axes = plt.subplots(n, n, figsize=(15, 12))
@@ -187,12 +198,12 @@ class Visualizer:
                     ax.fill_between(range(steps), 0, values, alpha=0.1, color="#1f77b4")
 
                 ax.set_title(f"{cause} → {effect}", fontsize=11)
-                ax.set_xlabel("滞后天数", fontsize=9)
+                ax.set_xlabel("Lag (Days)", fontsize=9)
                 if j == 0:
-                    ax.set_ylabel("响应", fontsize=9)
+                    ax.set_ylabel("Response", fontsize=9)
                 ax.grid(True, alpha=0.3)
 
-        fig.suptitle("脉冲响应函数 (IRF)", fontsize=14, y=1.02)
+        fig.suptitle("Impulse Response Function (IRF)", fontsize=14, y=1.02)
         plt.tight_layout()
 
         return self._save(fig, "impulse_response")
@@ -203,7 +214,7 @@ class Visualizer:
     def plot_regression_coefficients(
         self,
         regression_results: dict,
-        title: str = "情感→收益回归系数",
+        title: str = "Sentiment → Return Regression Coefficients",
     ):
         """绘制不同情感指标的回归系数对比"""
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -235,7 +246,7 @@ class Visualizer:
         ax.set_yticks(y_pos)
         ax.set_yticklabels(labels, fontsize=9)
         ax.axvline(x=0, color="red", linestyle="--", alpha=0.5)
-        ax.set_xlabel("系数值", fontsize=12)
+        ax.set_xlabel("Coefficient", fontsize=12)
         ax.set_title(title, fontsize=14)
         ax.grid(True, alpha=0.3, axis="x")
 
@@ -252,19 +263,21 @@ class Visualizer:
         # 直方图
         ax1.hist(df[sentiment_col].dropna(), bins=50, color="#1f77b4", alpha=0.7, edgecolor="white")
         ax1.axvline(x=0, color="red", linestyle="--", alpha=0.7)
-        ax1.set_xlabel("情感得分", fontsize=12)
-        ax1.set_ylabel("频数", fontsize=12)
-        ax1.set_title(f"{sentiment_col} 分布", fontsize=13)
+        ax1.set_xlabel("Sentiment Score", fontsize=12)
+        ax1.set_ylabel("Frequency", fontsize=12)
+        ax1.set_title(f"{sentiment_col} Distribution", fontsize=13)
 
         # 箱线图（按月）
         df_copy = df.copy()
         df_copy["month"] = df_copy["trade_date"].dt.month
         monthly_data = [df_copy[df_copy["month"] == m][sentiment_col].dropna() for m in range(1, 13)]
-        ax2.boxplot(monthly_data, labels=[f"{m}月" for m in range(1, 13)])
+        month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        ax2.boxplot(monthly_data, labels=month_labels)
         ax2.axhline(y=0, color="red", linestyle="--", alpha=0.5)
-        ax2.set_xlabel("月份", fontsize=12)
-        ax2.set_ylabel("情感得分", fontsize=12)
-        ax2.set_title("月度情感分布", fontsize=13)
+        ax2.set_xlabel("Month", fontsize=12)
+        ax2.set_ylabel("Sentiment Score", fontsize=12)
+        ax2.set_title("Monthly Sentiment Distribution", fontsize=13)
 
         plt.tight_layout()
         return self._save(fig, f"sentiment_distribution_{sentiment_col}")
@@ -280,24 +293,24 @@ class Visualizer:
         # 1. 收盘价
         ax1 = fig.add_subplot(gs[0, :])
         ax1.plot(df["trade_date"], df["close"], linewidth=1, color="#1f77b4")
-        ax1.set_title("沪深300 收盘价", fontsize=13)
-        ax1.set_ylabel("点位")
+        ax1.set_title("CSI 300 Close Price", fontsize=13)
+        ax1.set_ylabel("Index")
         ax1.grid(True, alpha=0.3)
 
         # 2. 情感指数
         ax2 = fig.add_subplot(gs[1, 0])
         ax2.plot(df["trade_date"], df[sentiment_col], linewidth=0.8, color="#2ca02c")
         ax2.axhline(y=0, color="red", linestyle="--", alpha=0.5)
-        ax2.set_title("日度情感指数", fontsize=12)
-        ax2.set_ylabel("得分")
+        ax2.set_title("Daily Sentiment Index", fontsize=12)
+        ax2.set_ylabel("Score")
         ax2.grid(True, alpha=0.3)
 
         # 3. 新闻数量
         ax3 = fig.add_subplot(gs[1, 1])
         if "news_count" in df.columns:
             ax3.bar(df["trade_date"], df["news_count"], alpha=0.6, color="#ff7f0e", width=1)
-        ax3.set_title("每日新闻数量", fontsize=12)
-        ax3.set_ylabel("条数")
+        ax3.set_title("Daily News Count", fontsize=12)
+        ax3.set_ylabel("Count")
         ax3.grid(True, alpha=0.3)
 
         # 4. 情感 vs 收益散点
@@ -306,16 +319,16 @@ class Visualizer:
         ax4.scatter(valid[sentiment_col], valid["return"], alpha=0.2, s=10, color="#1f77b4")
         ax4.axhline(y=0, color="gray", alpha=0.3)
         ax4.axvline(x=0, color="gray", alpha=0.3)
-        ax4.set_xlabel("情感得分")
-        ax4.set_ylabel("收益率")
-        ax4.set_title("情感 vs 收益", fontsize=12)
+        ax4.set_xlabel("Sentiment Score")
+        ax4.set_ylabel("Return")
+        ax4.set_title("Sentiment vs Return", fontsize=12)
         ax4.grid(True, alpha=0.3)
 
         # 5. 交易量
         ax5 = fig.add_subplot(gs[2, 1])
         if "volume_detrend" in df.columns:
             ax5.plot(df["trade_date"], df["volume_detrend"], linewidth=0.8, color="#d62728")
-        ax5.set_title("去趋势交易量", fontsize=12)
+        ax5.set_title("Detrended Volume", fontsize=12)
         ax5.set_ylabel("log(vol) - MA20")
         ax5.grid(True, alpha=0.3)
 

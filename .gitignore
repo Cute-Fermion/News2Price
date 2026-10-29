@@ -29,6 +29,9 @@ data/processed/
 results/figures/
 results/tables/
 
+# 运行输出（每次运行自动生成）
+outputs/
+
 # Jupyter
 .ipynb_checkpoints/
 

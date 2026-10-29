@@ -16,9 +16,9 @@ import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
 from statsmodels.tsa.stattools import grangercausalitytests
 
-from src.utils import load_config
+from src.utils import load_config, setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 class StatisticalAnalyzer:
@@ -82,7 +82,7 @@ class StatisticalAnalyzer:
         return {
             "model": model,
             "results": results,
-            "summary": results.summary().as_text(),
+            "summary": str(results.summary()),
             "coefficients": self._extract_coefficients(results),
             "granger": granger_results,
             "lag_selection": lag_selection,
@@ -93,12 +93,13 @@ class StatisticalAnalyzer:
         exog_cols = []
 
         if self.weekday_dummies:
-            weekday_cols = [c for c in df.columns if c.startswith("weekday_")]
+            # 只用 4 个星期哑变量（避免完全共线性），去掉 weekday_4（星期五）
+            weekday_cols = [c for c in df.columns if c.startswith("weekday_") and c != "weekday_4"]
             exog_cols.extend(weekday_cols)
 
         if self.month_dummies:
-            # 只用 11 个月份哑变量（避免完全共线性），去掉 month_1
-            month_cols = [c for c in df.columns if c.startswith("month_") and c != "month_1"]
+            # 只用 11 个月份哑变量（避免完全共线性），去掉 month_12
+            month_cols = [c for c in df.columns if c.startswith("month_") and c != "month_12"]
             exog_cols.extend(month_cols)
 
         if not exog_cols:
@@ -144,8 +145,11 @@ class StatisticalAnalyzer:
                     lag_result = gc_result[self.lags]
                     if isinstance(lag_result, dict):
                         f_pvalue = lag_result.get("ssr_ftest", (None, 1.0))[1]
-                    else:
+                    elif isinstance(lag_result, (list, tuple)):
                         f_pvalue = lag_result[0]["ssr_ftest"][1]
+                    else:
+                        # 某些版本返回嵌套结构
+                        f_pvalue = 1.0
                     granger_results[f"{cause}_→_{effect}"] = {
                         "f_pvalue": f_pvalue,
                         "significant": f_pvalue < self.significance_level,
@@ -192,9 +196,9 @@ class StatisticalAnalyzer:
 
         # 添加哑变量
         if self.weekday_dummies:
-            formula_cols.extend([c for c in data.columns if c.startswith("weekday_")])
+            formula_cols.extend([c for c in data.columns if c.startswith("weekday_") and c != "weekday_4"])
         if self.month_dummies:
-            formula_cols.extend([c for c in data.columns if c.startswith("month_") and c != "month_1"])
+            formula_cols.extend([c for c in data.columns if c.startswith("month_") and c != "month_12"])
 
         data_reg = data[["return"] + formula_cols].dropna()
 
@@ -236,9 +240,9 @@ class StatisticalAnalyzer:
         ] if c in data.columns]
 
         if self.weekday_dummies:
-            formula_cols.extend([c for c in data.columns if c.startswith("weekday_")])
+            formula_cols.extend([c for c in data.columns if c.startswith("weekday_") and c != "weekday_4"])
         if self.month_dummies:
-            formula_cols.extend([c for c in data.columns if c.startswith("month_") and c != "month_1"])
+            formula_cols.extend([c for c in data.columns if c.startswith("month_") and c != "month_12"])
 
         data_reg = data[[sentiment_col] + formula_cols].dropna()
 
@@ -277,10 +281,15 @@ class StatisticalAnalyzer:
                 data[f"{abs_col}_lag1"] = data[abs_col].shift(1)
                 abs_sentiment_cols.append(f"{abs_col}_lag1")
 
-        formula_cols = abs_sentiment_cols + ["return_lag1"] if "return_lag1" in data.columns else abs_sentiment_cols
+        if "return_lag1" not in data.columns:
+            data["return_lag1"] = data["return"].shift(1)
+
+        formula_cols = abs_sentiment_cols + ["return_lag1"]
 
         if self.weekday_dummies:
-            formula_cols.extend([c for c in data.columns if c.startswith("weekday_")])
+            formula_cols.extend([c for c in data.columns if c.startswith("weekday_") and c != "weekday_4"])
+        if self.month_dummies:
+            formula_cols.extend([c for c in data.columns if c.startswith("month_") and c != "month_12"])
 
         dep_var = "volume_detrend"
         data_reg = data[[dep_var] + formula_cols].dropna()
@@ -315,18 +324,20 @@ class StatisticalAnalyzer:
         results = var_result["results"]
         irf = results.irf(steps)
 
-        # 提取 IRF 数据
+        # 提取 IRF 数据（irfs 是 3D numpy 数组: [steps, n_vars, n_vars]）
+        var_list = list(results.model.endog_names)
         irf_data = {}
-        for cause in self.endogenous_vars:
-            for effect in self.endogenous_vars:
-                irf_data[f"{cause}_→_{effect}"] = irf.irf[cause][effect].values
+        for i, cause in enumerate(var_list):
+            for j, effect in enumerate(var_list):
+                irf_data[f"{cause}_→_{effect}"] = irf.irfs[:, j, i]
 
-        # 正交化脉冲响应
-        orth_irf = results.orth_irf(steps)
+        # 正交化脉冲响应（使用 Cholesky 分解）
+        P = np.linalg.cholesky(results.sigma_u)
+        orth_irf = results.irf(steps, var_decomp=P)
         orth_irf_data = {}
-        for cause in self.endogenous_vars:
-            for effect in self.endogenous_vars:
-                orth_irf_data[f"{cause}_→_{effect}"] = orth_irf.irf[cause][effect].values
+        for i, cause in enumerate(var_list):
+            for j, effect in enumerate(var_list):
+                orth_irf_data[f"{cause}_→_{effect}"] = orth_irf.irfs[:, j, i]
 
         return {
             "irf": irf_data,
@@ -344,11 +355,12 @@ class StatisticalAnalyzer:
         results = var_result["results"]
         fevd = results.fevd(steps)
 
+        var_list = list(results.model.endog_names)
         fevd_data = {}
-        for var in self.endogenous_vars:
+        for i, var in enumerate(var_list):
             fevd_data[var] = {}
-            for cause in self.endogenous_vars:
-                fevd_data[var][cause] = fevd.fevd[var][cause].values
+            for j, cause in enumerate(var_list):
+                fevd_data[var][cause] = fevd.decomp[i, :, j]
 
         return fevd_data
 
@@ -386,21 +398,33 @@ def run_full_analysis(df: pd.DataFrame, config: dict | None = None) -> dict:
     logger.info("\n" + "=" * 60)
     logger.info("3. 回归: 情感→收益")
     logger.info("=" * 60)
+    # 查找可用的情感列（优先 avg_sentiment，其次各方法独立列）
+    sentiment_cols_to_test = []
+    if "avg_sentiment" in df.columns:
+        sentiment_cols_to_test.append("avg_sentiment")
     for score_col in ["dict_score", "finbert_score", "llm_score"]:
-        if score_col in df.columns:
-            reg_result = analyzer.regression_sentiment_to_return(df, score_col)
-            results[f"regression_{score_col}"] = reg_result
-            if "summary" in reg_result:
-                logger.info(f"\n{score_col} 回归摘要:\n%s", reg_result["summary"][:800])
+        if score_col in df.columns and score_col not in sentiment_cols_to_test:
+            sentiment_cols_to_test.append(score_col)
+
+    for score_col in sentiment_cols_to_test:
+        reg_result = analyzer.regression_sentiment_to_return(df, score_col)
+        results[f"regression_{score_col}"] = reg_result
+        if "summary" in reg_result:
+            logger.info(f"\n{score_col} 回归摘要:\n%s", reg_result["summary"][:800])
+        elif "error" in reg_result:
+            logger.warning(f"  {score_col}: {reg_result['error']}")
 
     # 4. 回归: 收益→情感（反向因果）
     logger.info("\n" + "=" * 60)
     logger.info("4. 回归: 收益→情感（反向因果检验）")
     logger.info("=" * 60)
-    for score_col in ["dict_score", "finbert_score", "llm_score"]:
-        if score_col in df.columns:
-            reg_result = analyzer.regression_return_to_sentiment(df, score_col)
-            results[f"reverse_regression_{score_col}"] = reg_result
+    for score_col in sentiment_cols_to_test:
+        reg_result = analyzer.regression_return_to_sentiment(df, score_col)
+        results[f"reverse_regression_{score_col}"] = reg_result
+        if "summary" in reg_result:
+            logger.info(f"\n{score_col} 反向回归摘要:\n%s", reg_result["summary"][:800])
+        elif "error" in reg_result:
+            logger.warning(f"  {score_col}: {reg_result['error']}")
 
     # 5. 回归: 极端情感→交易量
     logger.info("\n" + "=" * 60)
@@ -410,6 +434,8 @@ def run_full_analysis(df: pd.DataFrame, config: dict | None = None) -> dict:
     results["regression_volume"] = vol_result
     if "summary" in vol_result:
         logger.info("\n交易量回归摘要:\n%s", vol_result["summary"][:800])
+    elif "error" in vol_result:
+        logger.warning(f"  交易量回归: {vol_result['error']}")
 
     # 6. 脉冲响应
     if "var" in results and "error" not in results["var"]:
